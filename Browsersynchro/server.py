@@ -7,6 +7,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.firefox import GeckoDriverManager
+from webdriver_manager.microsoft import EdgeChromiumDriverManager
 from flask import Flask, request
 from flask_cors import CORS
 import threading
@@ -16,6 +17,7 @@ from tkinter import messagebox
 from selenium.webdriver.chrome.options import Options
 import sys
 import os
+from selenium.webdriver.common.action_chains import ActionChains
 
 app = Flask(__name__)
 CORS(app)
@@ -27,40 +29,40 @@ driver_edge = None
 
 def find_and_click(driver, data, browser_name):
     try:
-        # 광고 영역이면 무시
-        if data.get('id') == 'ad_premium_area' or 'ad_premium_area' in (data.get('class') or ''):
-            print(f"❌ {browser_name} 광고 영역 클릭 무시")
-            return
+        li_class = data.get('liClass')
+        li_index = data.get('liIndex')
+        element = None
 
-        url = data.get('url')
+        if li_class is not None and li_index is not None:
+            # body 아래 모든 li 중 class가 정확히 일치하는 것만 필터
+            all_li = driver.find_elements(By.TAG_NAME, "li")
+            candidates = [el for el in all_li if el.get_attribute('class') == li_class]
+            if 0 <= li_index < len(candidates):
+                element = candidates[li_index]
+                # 내부 a, button 우선 클릭
+                try:
+                    a_tags = element.find_elements(By.TAG_NAME, "a")
+                    if a_tags:
+                        a_tags[0].click()
+                        print(f"✅ {browser_name} li 내부 a 클릭 완료")
+                        return
+                    button_tags = element.find_elements(By.TAG_NAME, "button")
+                    if button_tags:
+                        button_tags[0].click()
+                        print(f"✅ {browser_name} li 내부 button 클릭 완료")
+                        return
+                    element.click()
+                    print(f"✅ {browser_name} li 자체 클릭 완료")
+                    return
+                except Exception as e:
+                    print(f"🔥 {browser_name} li 클릭 오류: {e}")
+
+        # 이하 기존 id/class/text 탐색 로직 (liPath가 없을 때만)
         id_ = data.get('id')
         class_ = data.get('class')
         text = data.get('text')
-        scroll_y = data.get('scrollY')
 
-        if not driver:
-            print(f"🔥 {browser_name} 드라이버가 준비되지 않았습니다.")
-            return
-
-        driver.get(url)
-        WebDriverWait(driver, 10).until(lambda d: d.execute_script("return document.readyState") == "complete")
-        # time.sleep(2)  # 제거
-
-        # 클릭 직전 대기 최소화
-        # time.sleep(0.5)  # 줄이거나 제거
-
-        # 1. 스크롤 먼저 이동
-        if scroll_y is not None:
-            try:
-                driver.execute_script(f"window.scrollTo(0, {int(scroll_y)});")
-                print(f"✅ {browser_name} 스크롤 위치 이동 완료: {scroll_y}px")
-                time.sleep(0.5)  # 스크롤 후 대기
-            except Exception as e:
-                print(f"🔥 {browser_name} 스크롤 오류: {e}")
-
-        # 2. 요소 탐색 및 클릭
-        element = None
-        if id_:
+        if not element and id_:
             try:
                 element = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.ID, id_))
@@ -71,28 +73,27 @@ def find_and_click(driver, data, browser_name):
         if not element and class_:
             try:
                 class_name = class_.split()[0]
-                element = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, class_name))
+                elements = WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CLASS_NAME, class_name))
                 )
+                if elements:
+                    element = elements[0]
             except:
                 pass
 
         if not element and text:
             try:
-                element = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.XPATH, f"//*[text()='{text}']"))
+                elements = WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.XPATH, f"//*[text()='{text}']"))
                 )
+                if elements:
+                    element = elements[0]
             except:
                 pass
 
         if element:
             try:
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
-                time.sleep(0.5)
-                try:
-                    element.click()
-                except Exception:
-                    driver.execute_script("arguments[0].click();", element)
+                element.click()
                 print(f"✅ {browser_name} 자동 클릭 완료")
             except Exception as e:
                 print(f"🔥 {browser_name} 클릭 오류: {e}")
@@ -172,91 +173,99 @@ def scroll_in_all(data):
 def inject_js(driver):
     # 클릭 + 스크롤 감지 JS 코드
     js_code = """
-    // 클릭 이벤트
-    document.addEventListener('click', function(e) {
-        if (e.target.id === 'ad_premium_area' || e.target.className.includes('ad_premium_area')) {
-            return;
-        }
-        const elementInfo = {
-            action: 'click',
-            tag: e.target.tagName,
-            id: e.target.id,
-            class: e.target.className,
-            text: e.target.innerText,
-            url: window.location.href,
-            scrollX: window.scrollX,
-            scrollY: window.scrollY,
-            ctrlKey: e.ctrlKey,
-            shiftKey: e.shiftKey,
-            altKey: e.altKey,
-            metaKey: e.metaKey,
-            button: e.button // 0:좌클릭, 1:휠, 2:우클릭
-        };
-        fetch('http://localhost:5000/event', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(elementInfo)
+    if (!window.__browser_sync_injected) {
+        window.__browser_sync_injected = true;
+
+        // 클릭 이벤트
+        document.addEventListener('click', function(e) {
+            let targetLi = e.target;
+            while (targetLi && targetLi.tagName !== 'LI') {
+                targetLi = targetLi.parentElement;
+            }
+            if (targetLi) {
+                // 같은 class를 가진 형제 li들 중 몇 번째인지
+                const className = targetLi.className;
+                const siblings = Array.from(targetLi.parentNode.children)
+                    .filter(el => el.tagName === 'LI' && el.className === className);
+                const liIndex = siblings.indexOf(targetLi);
+
+                const elementInfo = {
+                    action: 'click',
+                    liClass: className,
+                    liIndex: liIndex,
+                    tag: e.target.tagName,
+                    id: e.target.id,
+                    class: e.target.className,
+                    text: e.target.innerText,
+                    url: window.location.href
+                };
+                fetch('http://localhost:5000/event', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(elementInfo)
+                });
+            }
         });
-    });
 
-    // 키다운 이벤트(선택, 필요시)
-    document.addEventListener('keydown', function(e) {
-        const keyInfo = {
-            action: 'keydown',
-            key: e.key,
-            code: e.code,
-            ctrlKey: e.ctrlKey,
-            shiftKey: e.shiftKey,
-            altKey: e.altKey,
-            metaKey: e.metaKey
-        };
-        fetch('http://localhost:5000/event', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(keyInfo)
-        });
-    });
-
-    // 스크롤 이벤트
-    let lastScrollX = window.scrollX;
-    let lastScrollY = window.scrollY;
-    window.addEventListener('scroll', function() {
-        const nowX = window.scrollX;
-        const nowY = window.scrollY;
-        if (Math.abs(nowX - lastScrollX) > 10 || Math.abs(nowY - lastScrollY) > 10) {
-            lastScrollX = nowX;
-            lastScrollY = nowY;
-            fetch('http://localhost:5000/event', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    action: 'scroll',
-                    url: window.location.href,
-                    scrollX: nowX,
-                    scrollY: nowY
-                })
-            });
-        }
-    });
-
-    // 입력값 변경 이벤트 (input, textarea)
-    document.addEventListener('input', function(e) {
-        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-            const inputInfo = {
-                action: 'input',
-                tag: e.target.tagName,
-                id: e.target.id,
-                class: e.target.className,
-                value: e.target.value,
-                url: window.location.href
+        // 키다운 이벤트
+        document.addEventListener('keydown', function(e) {
+            const keyInfo = {
+                action: 'keydown',
+                key: e.key,
+                code: e.code,
+                ctrlKey: e.ctrlKey,
+                shiftKey: e.shiftKey,
+                altKey: e.altKey,
+                metaKey: e.metaKey
             };
             fetch('http://localhost:5000/event', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(inputInfo)
+                body: JSON.stringify(keyInfo)
             });
-        }
-    });
+        });
+
+        // 스크롤 이벤트
+        let lastScrollX = window.scrollX;
+        let lastScrollY = window.scrollY;
+        window.addEventListener('scroll', function() {
+            const nowX = window.scrollX;
+            const nowY = window.scrollY;
+            if (Math.abs(nowX - lastScrollX) > 10 || Math.abs(nowY - lastScrollY) > 10) {
+                lastScrollX = nowX;
+                lastScrollY = nowY;
+                fetch('http://localhost:5000/event', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        action: 'scroll',
+                        url: window.location.href,
+                        scrollX: nowX,
+                        scrollY: nowY
+                    })
+                });
+            }
+        });
+
+        // 입력값 변경 이벤트 (input, textarea)
+        document.addEventListener('input', function(e) {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                const inputInfo = {
+                    action: 'input',
+                    tag: e.target.tagName,
+                    id: e.target.id,
+                    class: e.target.className,
+                    value: e.target.value,
+                    url: window.location.href
+                };
+                fetch('http://localhost:5000/event', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(inputInfo)
+                });
+            }
+        });
+    }
     """
     driver.execute_script(js_code)
 
@@ -373,7 +382,7 @@ if __name__ == '__main__':
     # 드라이버 경로 미리 받아두기
     chrome_driver_path = ChromeDriverManager().install()
     firefox_driver_path = GeckoDriverManager().install()
-    edge_driver_path = r"D:\Browser\drivers\msedgedriver.exe"
+    edge_driver_path = r"D:\Browser\AutoTest\Browsersynchro\drivers\msedgedriver.exe"
 
     # 1) 수동 조작용 Chrome (항상 실행)
     chrome_options = Options()
@@ -395,6 +404,7 @@ if __name__ == '__main__':
     # 3) 자동 따라하기용 Edge
     driver_edge = None
     if use_edge:
+        from selenium.webdriver.edge.options import Options as EdgeOptions
         service_edge = EdgeService(executable_path=edge_driver_path)
         driver_edge = webdriver.Edge(service=service_edge)
         driver_edge.maximize_window()
@@ -404,24 +414,33 @@ if __name__ == '__main__':
     js_code = """
     // 클릭 이벤트
     document.addEventListener('click', function(e) {
-        if (e.target.id === 'ad_premium_area' || e.target.className.includes('ad_premium_area')) {
-            return;
+        let targetLi = e.target;
+        while (targetLi && targetLi.tagName !== 'LI') {
+            targetLi = targetLi.parentElement;
         }
-        const elementInfo = {
-            action: 'click',
-            tag: e.target.tagName,
-            id: e.target.id,
-            class: e.target.className,
-            text: e.target.innerText,
-            url: window.location.href,
-            scrollX: window.scrollX,
-            scrollY: window.scrollY
-        };
-        fetch('http://localhost:5000/event', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(elementInfo)
-        });
+        if (targetLi) {
+            // 같은 class를 가진 형제 li들 중 몇 번째인지
+            const className = targetLi.className;
+            const siblings = Array.from(targetLi.parentNode.children)
+                .filter(el => el.tagName === 'LI' && el.className === className);
+            const liIndex = siblings.indexOf(targetLi);
+
+            const elementInfo = {
+                action: 'click',
+                liClass: className,
+                liIndex: liIndex,
+                tag: e.target.tagName,
+                id: e.target.id,
+                class: e.target.className,
+                text: e.target.innerText,
+                url: window.location.href
+            };
+            fetch('http://localhost:5000/event', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(elementInfo)
+            });
+        }
     });
 
     // 스크롤 이벤트
