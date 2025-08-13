@@ -26,6 +26,8 @@ app = Flask(__name__)
 CORS(app)
 
 driver_chrome_main = None
+driver_firefox_main = None
+driver_edge_main = None
 driver_chrome_follow = None
 driver_firefox = None
 driver_edge = None
@@ -57,9 +59,9 @@ def find_and_click(driver, data, browser_name):
         print(f"🔎 클릭 경로(path): {path}")
         element = None
 
-        # 1. path 기반 탐색
+        # 1. path 기반 탐색 (모든 프레임에서)
         if path and isinstance(path, list) and len(path) > 0:
-            element = find_element_by_path(driver, path)
+            element = find_element_by_path_in_all_frames(driver, path)
             hover_targets = get_hover_targets(driver, path)
             hover_menu_chain(driver, hover_targets)
 
@@ -84,7 +86,7 @@ def find_element_by_path(driver, path):
         class_names = class_name.split() if class_name else []
         def class_match(el):
             el_classes = el.get_attribute('class').split()
-            return all(c in el_classes for c in class_names) if class_names else True
+            return all(c in el_classes for c in el_classes) if class_names else True
         children = parent.find_elements(By.XPATH, "./*")
         siblings = [el for el in children if el.tag_name.upper() == tag]
         if 0 <= idx < len(siblings):
@@ -127,7 +129,7 @@ def find_element_by_id_class_text(driver, data):
     element = None
 
     if id_:
-        element = wait_and_find_element(driver, By.ID, id_)
+        element = find_element_in_all_frames(driver, By.ID, id_)
     if not element and class_:
         class_name = class_.split()[0]
         elements = wait_and_find_elements(driver, By.CLASS_NAME, class_name)
@@ -158,11 +160,22 @@ def click_element_with_priority(element, browser_name):
 # =====================[ 브라우저별 클릭 핸들러 ]=====================
 def click_in_chrome_follow(data):
     global driver_chrome_follow
-    if driver_chrome_follow is None:
-        service = ChromeService(executable_path=ChromeDriverManager().install())
-        driver_chrome_follow = webdriver.Chrome(service=service)
-        driver_chrome_follow.maximize_window()
     find_and_click(driver_chrome_follow, data, "Chrome (Follow)")
+
+def input_in_chrome_follow(data):
+    global driver_chrome_follow
+    input_to_driver(driver_chrome_follow, data, "Chrome (Follow)")
+
+def scroll_in_chrome_follow(data):
+    global driver_chrome_follow
+    scroll_x = data.get('scrollX', 0)
+    scroll_y = data.get('scrollY', 0)
+    if driver_chrome_follow:
+        try:
+            driver_chrome_follow.execute_script(f"window.scrollTo({int(scroll_x)}, {int(scroll_y)});")
+            print(f"✅ Chrome(Follow) 스크롤 위치 이동: x={scroll_x}, y={scroll_y}")
+        except Exception as e:
+            print(f"🔥 Chrome(Follow) 스크롤 오류: {e}")
 
 def click_in_firefox(data):
     global driver_firefox
@@ -192,13 +205,22 @@ def handle_event():
 
     threads = []
     if action == 'scroll':
-        threads.append(threading.Thread(target=scroll_in_all, args=(data,)))
+        if driver_chrome_follow:
+            threads.append(threading.Thread(target=scroll_in_chrome_follow, args=(data,)))
+        if driver_firefox:
+            threads.append(threading.Thread(target=scroll_in_all, args=(data,)))
+        if driver_edge:
+            threads.append(threading.Thread(target=scroll_in_all, args=(data,)))
     elif action == 'click':
+        if driver_chrome_follow:
+            threads.append(threading.Thread(target=click_in_chrome_follow, args=(data,)))
         if driver_firefox:
             threads.append(threading.Thread(target=click_in_firefox, args=(data,)))
         if driver_edge:
             threads.append(threading.Thread(target=click_in_edge, args=(data,)))
     elif action == 'input':
+        if driver_chrome_follow:
+            threads.append(threading.Thread(target=input_in_chrome_follow, args=(data,)))
         if driver_firefox:
             threads.append(threading.Thread(target=input_in_firefox, args=(data,)))
         if driver_edge:
@@ -224,100 +246,144 @@ def scroll_in_all(data):
             print(f"🔥 {name} 스크롤 오류: {e}")
 
 def inject_js(driver):
-    # 클릭 + 스크롤 + 입력 감지 JS 코드
     js_code = """
-    if (!window.__browser_sync_injected) {
-        window.__browser_sync_injected = true;
+    function injectSyncEvents(doc) {
+        if (!doc.__browser_sync_injected) {
+            doc.__browser_sync_injected = true;
 
-        // 클릭 이벤트
-        document.addEventListener('click', function(e) {
-            let path = [];
-            let elem = e.target;
-            while (elem && elem.tagName !== 'BODY') {
-                const siblings = Array.from(elem.parentNode.children)
-                    .filter(el => el.tagName === elem.tagName);
-                path.unshift({
-                    tag: elem.tagName,
-                    class: elem.className,
-                    index: siblings.indexOf(elem)
-                });
-                elem = elem.parentElement;
-            }
-            const elementInfo = {
-                action: 'click',
-                path: path,
-                tag: e.target.tagName,
-                id: e.target.id,
-                class: e.target.className,
-                text: e.target.innerText,
-                url: window.location.href
-            };
-            fetch('http://localhost:5000/event', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(elementInfo)
+            // 입력값 변경 이벤트 (input, textarea) - debounce 적용
+            let inputTimer = null;
+            doc.addEventListener('input', function(e) {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                    if (inputTimer) clearTimeout(inputTimer);
+                    inputTimer = setTimeout(function() {
+                        const inputInfo = {
+                            action: 'input',
+                            tag: e.target.tagName,
+                            id: e.target.id,
+                            class: e.target.className,
+                            value: e.target.value,
+                            url: doc.location.href
+                        };
+                        console.log("[브라우저 동기화] input 이벤트 전송", inputInfo);
+                        fetch('http://localhost:5000/event', {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify(inputInfo)
+                        });
+                    }, 150);
+                }
             });
-        });
 
-        // 키다운 이벤트
-        document.addEventListener('keydown', function(e) {
-            const keyInfo = {
-                action: 'keydown',
-                key: e.key,
-                code: e.code,
-                ctrlKey: e.ctrlKey,
-                shiftKey: e.shiftKey,
-                altKey: e.altKey,
-                metaKey: e.metaKey
-            };
-            fetch('http://localhost:5000/event', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(keyInfo)
-            });
-        });
-
-        // 스크롤 이벤트
-        let lastScrollX = window.scrollX;
-        let lastScrollY = window.scrollY;
-        window.addEventListener('scroll', function() {
-            const nowX = window.scrollX;
-            const nowY = window.scrollY;
-            if (Math.abs(nowX - lastScrollX) > 10 || Math.abs(nowY - lastScrollY) > 10) {
-                lastScrollX = nowX;
-                lastScrollY = nowY;
-                fetch('http://localhost:5000/event', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        action: 'scroll',
-                        url: window.location.href,
-                        scrollX: nowX,
-                        scrollY: nowY
-                    })
-                });
-            }
-        });
-
-        // 입력값 변경 이벤트 (input, textarea)
-        document.addEventListener('input', function(e) {
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-                const inputInfo = {
-                    action: 'input',
+            // 클릭 이벤트
+            doc.addEventListener('click', function(e) {
+                let path = [];
+                let elem = e.target;
+                while (elem && elem.tagName !== 'BODY') {
+                    const siblings = Array.from(elem.parentNode.children)
+                        .filter(el => el.tagName === elem.tagName);
+                    path.unshift({
+                        tag: elem.tagName,
+                        class: elem.className,
+                        index: siblings.indexOf(elem)
+                    });
+                    elem = elem.parentElement;
+                }
+                const elementInfo = {
+                    action: 'click',
+                    path: path,
                     tag: e.target.tagName,
                     id: e.target.id,
                     class: e.target.className,
-                    value: e.target.value,
-                    url: window.location.href
+                    text: e.target.innerText,
+                    url: doc.location.href
                 };
+                console.log("[브라우저 동기화] click 이벤트 전송", elementInfo);
                 fetch('http://localhost:5000/event', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(inputInfo)
+                    body: JSON.stringify(elementInfo)
                 });
+            });
+
+            // 키다운 이벤트
+            doc.addEventListener('keydown', function(e) {
+                const keyInfo = {
+                    action: 'keydown',
+                    key: e.key,
+                    code: e.code,
+                    ctrlKey: e.ctrlKey,
+                    shiftKey: e.shiftKey,
+                    altKey: e.altKey,
+                    metaKey: e.metaKey
+                };
+                console.log("[브라우저 동기화] keydown 이벤트 전송", keyInfo);
+                fetch('http://localhost:5000/event', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(keyInfo)
+                });
+            });
+
+            // 스크롤 이벤트
+            let lastScrollX = doc.defaultView.scrollX;
+            let lastScrollY = doc.defaultView.scrollY;
+            doc.defaultView.addEventListener('scroll', function() {
+                const nowX = doc.defaultView.scrollX;
+                const nowY = doc.defaultView.scrollY;
+                if (Math.abs(nowX - lastScrollX) > 10 || Math.abs(nowY - lastScrollY) > 10) {
+                    lastScrollX = nowX;
+                    lastScrollY = nowY;
+                    const scrollInfo = {
+                        action: 'scroll',
+                        url: doc.location.href,
+                        scrollX: nowX,
+                        scrollY: nowY
+                    };
+                    console.log("[브라우저 동기화] scroll 이벤트 전송", scrollInfo);
+                    fetch('http://localhost:5000/event', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(scrollInfo)
+                    });
+                }
+            });
+        }
+    }
+
+    // 메인 문서에 주입
+    injectSyncEvents(document);
+
+    // 모든 iframe에도 주입
+    function injectAllIframes(doc) {
+        Array.from(doc.getElementsByTagName('iframe')).forEach(function(iframe) {
+            try {
+                if (iframe.contentDocument) {
+                    injectSyncEvents(iframe.contentDocument);
+                }
+            } catch (e) {
+                // cross-origin iframe은 접근 불가
             }
         });
     }
+    injectAllIframes(document);
+
+    // iframe 동적 생성/변경 감지
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            mutation.addedNodes.forEach(function(node) {
+                if (node.tagName === 'IFRAME') {
+                    try {
+                        if (node.contentDocument) {
+                            injectSyncEvents(node.contentDocument);
+                        }
+                    } catch (e) {}
+                }
+            });
+        });
+        injectAllIframes(document);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
     """
     driver.execute_script(js_code)
 
@@ -325,14 +391,24 @@ def monitor_and_inject(driver):
     last_url = driver.current_url
     while True:
         time.sleep(1)
-        if driver.current_url != last_url:
-            inject_js(driver)
-            last_url = driver.current_url
+        try:
+            if driver.current_url != last_url:
+                inject_js(driver)
+                last_url = driver.current_url
+        except Exception as e:
+            print(f"monitor_and_inject 종료: {e}")
+            break  # 브라우저가 닫히면 스레드 종료
 
 def close_all_and_exit():
     try:
-        if driver_chrome_main:
+        # 수동 브라우저 종료
+        if 'driver_chrome_main' in globals() and driver_chrome_main:
             driver_chrome_main.quit()
+        if 'driver_firefox_main' in globals() and driver_firefox_main:
+            driver_firefox_main.quit()
+        if 'driver_edge_main' in globals() and driver_edge_main:
+            driver_edge_main.quit()
+        # 따라하기용 브라우저 종료
         if driver_chrome_follow:
             driver_chrome_follow.quit()
         if driver_firefox:
@@ -353,6 +429,8 @@ except ImportError:
 def get_user_input():
     def on_submit():
         url = url_entry.get().strip()
+        manual_browser = manual_var.get()
+        use_chrome_follow = var_chrome_follow.get()
         use_firefox = var_firefox.get()
         use_edge = var_edge.get()
         edge_driver_path = edge_entry.get().strip()
@@ -363,12 +441,13 @@ def get_user_input():
             messagebox.showerror("오류", "Edge 드라이버 경로를 입력하세요.")
             return
         root.user_url = url
+        root.manual_browser = manual_browser
+        root.use_chrome_follow = use_chrome_follow
         root.use_firefox = use_firefox
         root.use_edge = use_edge
         root.edge_driver_path = edge_driver_path
         root.destroy()
 
-    # TkinterDnD를 사용할 수 있으면 DnD 지원, 아니면 일반 Tk 사용
     if DND_AVAILABLE:
         root = TkinterDnD.Tk()
     else:
@@ -378,17 +457,29 @@ def get_user_input():
     url_entry = tk.Entry(root, width=40)
     url_entry.pack()
     url_entry.insert(0, "https://")
+
+    # 수동 브라우저 선택 (라디오버튼)
+    tk.Label(root, text="수동 브라우저 선택:").pack()
+    manual_var = tk.StringVar(value="chrome")
+    tk.Radiobutton(root, text="Chrome", variable=manual_var, value="chrome").pack(anchor='w')
+    tk.Radiobutton(root, text="Firefox", variable=manual_var, value="firefox").pack(anchor='w')
+    tk.Radiobutton(root, text="Edge", variable=manual_var, value="edge").pack(anchor='w')
+
+    # 따라하기용 브라우저 선택 (체크박스)
+    tk.Label(root, text="따라하기 페이지 선택:").pack()
+    var_chrome_follow = tk.BooleanVar()
     var_firefox = tk.BooleanVar()
     var_edge = tk.BooleanVar()
+    tk.Checkbutton(root, text="Chrome 따라하기", variable=var_chrome_follow).pack(anchor='w')
     tk.Checkbutton(root, text="Firefox 따라하기", variable=var_firefox).pack(anchor='w')
     tk.Checkbutton(root, text="Edge 따라하기", variable=var_edge).pack(anchor='w')
+
     tk.Label(root, text="Edge 드라이버 경로 (드래그&드롭 가능):").pack()
     edge_entry = tk.Entry(root, width=60)
     edge_entry.pack()
     edge_entry.insert(0, r"D:\Browser\AutoTest\Browsersynchro\drivers\msedgedriver.exe")
     if DND_AVAILABLE:
         def drop(event):
-            # 파일 경로만 추출
             path = event.data.strip('{}')
             edge_entry.delete(0, tk.END)
             edge_entry.insert(0, path)
@@ -397,7 +488,7 @@ def get_user_input():
     tk.Button(root, text="시작", command=on_submit).pack(pady=10)
     root.protocol("WM_DELETE_WINDOW", close_all_and_exit)
     root.mainloop()
-    return root.user_url, root.use_firefox, root.use_edge, root.edge_driver_path
+    return (root.user_url, root.manual_browser, root.use_chrome_follow, root.use_firefox, root.use_edge, root.edge_driver_path)
 
 def input_in_firefox(data):
     input_to_driver(driver_firefox, data, "Firefox")
@@ -415,14 +506,19 @@ def input_to_driver(driver, data, browser_name):
             return
         element = None
         if id_:
-            element = wait_and_find_element(driver, By.ID, id_, timeout=5)
+            element = find_element_in_all_frames(driver, By.ID, id_)
         if not element and class_:
             class_name = class_.split()[0]
             element = wait_and_find_element(driver, By.CLASS_NAME, class_name, timeout=5)
         if element:
-            element.clear()
-            element.send_keys(value)
-            print(f"✅ {browser_name} 입력값 동기화: {value}")
+            # 기존 값과 다를 때만 입력
+            current_value = element.get_attribute("value")
+            if current_value != value:
+                element.clear()
+                element.send_keys(value)
+                print(f"✅ {browser_name} 입력값 동기화: {value}")
+            else:
+                print(f"⏩ {browser_name} 입력값 동일, 동기화 생략")
         else:
             print(f"❌ {browser_name}에서 입력 요소를 찾지 못했습니다")
     except Exception as e:
@@ -462,23 +558,117 @@ def find_clickable_by_class(driver, keywords=["menu", "btn", "nav", "header"]):
             candidates.append(el)
     return candidates
 
+def find_element_in_all_frames(driver, by, value):
+    # 1. 메인 프레임에서 시도
+    try:
+        return driver.find_element(by, value)
+    except:
+        pass
+    # 2. 모든 iframe에서 시도
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    for iframe in iframes:
+        try:
+            driver.switch_to.frame(iframe)
+            el = driver.find_element(by, value)
+            driver.switch_to.default_content()
+            return el
+        except:
+            driver.switch_to.default_content()
+            continue
+    return None
+
+def find_element_by_path_in_all_frames(driver, path):
+    # 1. 메인 프레임에서 시도
+    try:
+        driver.switch_to.default_content()
+        el = find_element_by_path(driver, path)
+        if el:
+            return el
+    except Exception:
+        pass
+    # 2. 모든 iframe에서 시도
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    for iframe in iframes:
+        try:
+            driver.switch_to.frame(iframe)
+            el = find_element_by_path(driver, path)
+            driver.switch_to.default_content()
+            if el:
+                return el
+        except Exception:
+            driver.switch_to.default_content()
+            continue
+    driver.switch_to.default_content()
+    return None
+
+def find_element_by_path_in_all_frames_recursive(driver, path):
+    def _search(driver):
+        # 1. 현재 프레임에서 시도
+        try:
+            el = find_element_by_path(driver, path)
+            if el:
+                return el
+        except Exception:
+            pass
+        # 2. 하위 iframe에서 재귀적으로 시도
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for iframe in iframes:
+            try:
+                driver.switch_to.frame(iframe)
+                found = _search(driver)
+                driver.switch_to.default_content()
+                if found:
+                    return found
+            except Exception:
+                driver.switch_to.default_content()
+                continue
+        driver.switch_to.default_content()
+        return None
+    # 항상 최상위 프레임부터 시작
+    driver.switch_to.default_content()
+    return _search(driver)
+
 # =====================[ 메인 실행부 ]=====================
 if __name__ == '__main__':
-    test_url, use_firefox, use_edge, edge_driver_path = get_user_input()
+    test_url, manual_browser, use_chrome_follow, use_firefox, use_edge, edge_driver_path = get_user_input()
 
-    # 드라이버 경로 미리 받아두기
     chrome_driver_path = ChromeDriverManager().install()
     firefox_driver_path = GeckoDriverManager().install()
 
-    # 1) 수동 조작용 Chrome (항상 실행)
-    chrome_options = Options()
-    chrome_options.add_argument('--proxy-server=http://프록시주소:포트')
-    service_main = ChromeService(executable_path=chrome_driver_path)
-    driver_chrome_main = webdriver.Chrome(service=service_main, options=chrome_options)
-    driver_chrome_main.maximize_window()
-    driver_chrome_main.get(test_url)
+    manual_driver = None
 
-    # 2) 자동 따라하기용 Firefox
+    # 수동 브라우저만 생성
+    if manual_browser == "chrome":
+        chrome_options = Options()
+        chrome_options.add_argument('--proxy-server=http://프록시주소:포트')
+        service_chrome = ChromeService(executable_path=chrome_driver_path)
+        driver_chrome_main = webdriver.Chrome(service=service_chrome, options=chrome_options)
+        driver_chrome_main.maximize_window()
+        driver_chrome_main.get(test_url)
+        manual_driver = driver_chrome_main
+    elif manual_browser == "firefox":
+        service_firefox_main = FirefoxService(executable_path=firefox_driver_path)
+        driver_firefox_main = webdriver.Firefox(service=service_firefox_main)
+        driver_firefox_main.maximize_window()
+        driver_firefox_main.get(test_url)
+        manual_driver = driver_firefox_main
+    elif manual_browser == "edge":
+        from selenium.webdriver.edge.options import Options as EdgeOptions
+        service_edge_main = EdgeService(executable_path=edge_driver_path)
+        driver_edge_main = webdriver.Edge(service=service_edge_main)
+        driver_edge_main.maximize_window()
+        driver_edge_main.get(test_url)
+        manual_driver = driver_edge_main
+
+    # 따라하기용 Chrome
+    driver_chrome_follow = None
+    if use_chrome_follow and manual_browser != "chrome":
+        service_chrome_follow = ChromeService(executable_path=chrome_driver_path)
+        driver_chrome_follow = webdriver.Chrome(service=service_chrome_follow)
+        driver_chrome_follow.maximize_window()
+        driver_chrome_follow.get(test_url)
+
+    # 따라하기용 Firefox
     driver_firefox = None
     if use_firefox:
         service_firefox = FirefoxService(executable_path=firefox_driver_path)
@@ -486,25 +676,19 @@ if __name__ == '__main__':
         driver_firefox.maximize_window()
         driver_firefox.get(test_url)
 
-    # 3) 자동 따라하기용 Edge
+    # 따라하기용 Edge
     driver_edge = None
     if use_edge:
-        from selenium.webdriver.edge.options import Options as EdgeOptions
         service_edge = EdgeService(executable_path=edge_driver_path)
         driver_edge = webdriver.Edge(service=service_edge)
         driver_edge.maximize_window()
         driver_edge.get(test_url)
 
-    # 클릭 + 스크롤 감지 JS 코드 (수동 Chrome에 삽입)
-    inject_js(driver_chrome_main)
+    # 수동 브라우저에만 JS 삽입
+    inject_js(manual_driver)
 
     print('서버 실행 중... http://localhost:5000')
 
-    # Flask를 별도 스레드로 실행
     threading.Thread(target=lambda: app.run(port=5000, threaded=True, use_reloader=False)).start()
-
-    # URL 변경 감지 및 JS 코드 주입 스레드 시작
-    threading.Thread(target=monitor_and_inject, args=(driver_chrome_main,)).start()
-
-    # 종료 대기 UI 표시
+    threading.Thread(target=monitor_and_inject, args=(manual_driver,)).start()
     show_exit_window()
