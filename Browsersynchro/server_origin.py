@@ -35,6 +35,23 @@ driver_edge = None
 EDGE_DRIVER_PATH = r"D:\Browser\AutoTest\Browsersynchro\drivers\msedgedriver.exe"
 CLICKABLE_TAGS = ["button", "a", "span", "li", "div"]
 
+# 따라하기 브라우저별 최근 클릭 정보 저장
+recent_clicks = {
+    "chrome": {"info": None, "time": 0},
+    "firefox": {"info": None, "time": 0},
+    "edge": {"info": None, "time": 0},
+}
+
+def is_duplicate_click(browser_name, element_info):
+    now = time.time()
+    rc = recent_clicks[browser_name]
+    key = (element_info.get("id"), element_info.get("class"), element_info.get("text"), str(element_info.get("path")))
+    if rc["info"] == key and now - rc["time"] < 2:  # 2초 이내 중복 클릭 방지
+        return True
+    rc["info"] = key
+    rc["time"] = now
+    return False
+
 # =====================[ 유틸리티 함수 ]=====================
 def wait_and_find_element(driver, by, value, timeout=10):
     try:
@@ -59,11 +76,12 @@ def find_and_click(driver, data, browser_name):
         print(f"🔎 클릭 경로(path): {path}")
         element = None
 
-        # 1. path 기반 탐색
+        # 1. path 기반 탐색 (모든 프레임에서)
         if path and isinstance(path, list) and len(path) > 0:
-            element = find_element_by_path(driver, path)
+            element = find_element_by_path_in_all_frames(driver, path)
             hover_targets = get_hover_targets(driver, path)
-            hover_menu_chain(driver, hover_targets)
+            # hover는 마지막 요소만
+            hover_menu_chain(driver, hover_targets[-1:])
 
         # 2. id/class/text 기반 탐색 (path 실패 시)
         if not element:
@@ -86,7 +104,7 @@ def find_element_by_path(driver, path):
         class_names = class_name.split() if class_name else []
         def class_match(el):
             el_classes = el.get_attribute('class').split()
-            return all(c in el_classes for c in class_names) if class_names else True
+            return all(c in el_classes for c in el_classes) if class_names else True
         children = parent.find_elements(By.XPATH, "./*")
         siblings = [el for el in children if el.tag_name.upper() == tag]
         if 0 <= idx < len(siblings):
@@ -113,14 +131,14 @@ def get_hover_targets(driver, path):
     return hover_targets
 
 def hover_menu_chain(driver, hover_targets):
-    if len(hover_targets) > 1:
+    # 마지막 요소만 hover (실제 클릭 대상)
+    if hover_targets:
         actions = ActionChains(driver)
-        for hover_el in hover_targets[:-1]:
-            try:
-                actions.move_to_element(hover_el).perform()
-                time.sleep(0.05)  # 딜레이 최소화
-            except Exception as e:
-                print(f"⚠️ Hover 실패: {e}")
+        try:
+            actions.move_to_element(hover_targets[-1]).perform()
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"⚠️ Hover 실패: {e}")
 
 def find_element_by_id_class_text(driver, data):
     id_ = data.get('id')
@@ -129,37 +147,50 @@ def find_element_by_id_class_text(driver, data):
     element = None
 
     if id_:
-        element = wait_and_find_element(driver, By.ID, id_)
+        element = find_element_in_all_frames(driver, By.ID, id_)
     if not element and class_:
         class_name = class_.split()[0]
         elements = wait_and_find_elements(driver, By.CLASS_NAME, class_name)
         if elements:
             element = elements[0]
     if not element and text:
-        elements = wait_and_find_elements(driver, By.XPATH, f"//*[text()='{text}']")
+        # 부분 일치로 모든 태그에서 탐색
+        elements = wait_and_find_elements(driver, By.XPATH, f"//*[contains(text(), '{text}')]")
         if elements:
-            element = elements[0]
+            # <a> 또는 <span>이 있으면 우선적으로 선택
+            for el in elements:
+                if el.tag_name.lower() in ["a", "span", "button"]:
+                    element = el
+                    break
+            if not element:
+                element = elements[0]
     return element
 
 def click_element_with_priority(element, browser_name):
+    # 내부 모든 클릭 가능한 태그를 순차적으로 클릭 시도
     for sub_tag in ["button", "a", "span", "i"]:
         sub_elements = element.find_elements(By.TAG_NAME, sub_tag)
-        if sub_elements:
+        for sub_el in sub_elements:
             try:
-                sub_elements[0].click()
-                print(f"✅ {browser_name} 내부 {sub_tag} 클릭 완료")
+                # JS로 클릭 시도
+                element.parent.execute_script("arguments[0].click();", sub_el)
+                print(f"✅ {browser_name} 내부 {sub_tag} JS 클릭 완료")
                 return
             except Exception as e:
-                print(f"🔥 {browser_name} 내부 {sub_tag} 클릭 오류: {e}")
+                print(f"🔥 {browser_name} 내부 {sub_tag} JS 클릭 오류: {e}")
+    # 마지막으로 자신도 JS 클릭 시도
     try:
-        element.click()
-        print(f"✅ {browser_name} 자체 클릭 완료")
+        element.parent.execute_script("arguments[0].click();", element)
+        print(f"✅ {browser_name} 자체 JS 클릭 완료")
     except Exception as e:
-        print(f"🔥 {browser_name} 자체 클릭 오류: {e}")
+        print(f"🔥 {browser_name} 자체 JS 클릭 오류: {e}")
 
 # =====================[ 브라우저별 클릭 핸들러 ]=====================
 def click_in_chrome_follow(data):
     global driver_chrome_follow
+    if is_duplicate_click("chrome", data):
+        print("⏩ Chrome(Follow) 중복 클릭 방지")
+        return
     find_and_click(driver_chrome_follow, data, "Chrome (Follow)")
 
 def input_in_chrome_follow(data):
@@ -179,11 +210,17 @@ def scroll_in_chrome_follow(data):
 
 def click_in_firefox(data):
     global driver_firefox
+    if is_duplicate_click("firefox", data):
+        print("⏩ Firefox(Follow) 중복 클릭 방지")
+        return
     if driver_firefox:
         find_and_click(driver_firefox, data, "Firefox")
 
 def click_in_edge(data):
     global driver_edge
+    if is_duplicate_click("edge", data):
+        print("⏩ Edge(Follow) 중복 클릭 방지")
+        return
     if driver_edge:
         find_and_click(driver_edge, data, "Edge")
 
@@ -202,32 +239,66 @@ def handle_event():
     data = request.json
     action = data.get('action')
     print(f"🔔 이벤트 수신: {data}")
+    # 추가 로그
+    print(f"수신 action: {action}, 태그: {data.get('tag')}, text: {data.get('text')}, url: {data.get('url')}")
 
     threads = []
+    # 스크롤 이벤트
     if action == 'scroll':
-        if driver_chrome_follow:
+        if driver_chrome_follow and manual_browser != "chrome":
             threads.append(threading.Thread(target=scroll_in_chrome_follow, args=(data,)))
-        if driver_firefox:
-            threads.append(threading.Thread(target=scroll_in_all, args=(data,)))
-        if driver_edge:
-            threads.append(threading.Thread(target=scroll_in_all, args=(data,)))
+        if driver_firefox and manual_browser != "firefox":
+            threads.append(threading.Thread(target=scroll_in_firefox, args=(data,)))
+        if driver_edge and manual_browser != "edge":
+            threads.append(threading.Thread(target=scroll_in_edge, args=(data,)))
+    # 클릭 이벤트
     elif action == 'click':
-        if driver_chrome_follow:
+        if driver_chrome_follow and manual_browser != "chrome":
             threads.append(threading.Thread(target=click_in_chrome_follow, args=(data,)))
-        if driver_firefox:
+        if driver_firefox and manual_browser != "firefox":
             threads.append(threading.Thread(target=click_in_firefox, args=(data,)))
-        if driver_edge:
+        if driver_edge and manual_browser != "edge":
             threads.append(threading.Thread(target=click_in_edge, args=(data,)))
+    # 입력 이벤트
     elif action == 'input':
-        if driver_chrome_follow:
+        if driver_chrome_follow and manual_browser != "chrome":
             threads.append(threading.Thread(target=input_in_chrome_follow, args=(data,)))
-        if driver_firefox:
+        if driver_firefox and manual_browser != "firefox":
             threads.append(threading.Thread(target=input_in_firefox, args=(data,)))
-        if driver_edge:
+        if driver_edge and manual_browser != "edge":
             threads.append(threading.Thread(target=input_in_edge, args=(data,)))
     for t in threads:
         t.start()
     return 'OK', 200
+
+# 따라하기용 Firefox/Edge 핸들러 추가
+def scroll_in_firefox(data):
+    global driver_firefox
+    scroll_x = data.get('scrollX', 0)
+    scroll_y = data.get('scrollY', 0)
+    if driver_firefox:
+        try:
+            driver_firefox.execute_script(f"window.scrollTo({int(scroll_x)}, {int(scroll_y)});")
+            print(f"✅ Firefox(Follow) 스크롤 위치 이동: x={scroll_x}, y={scroll_y}")
+        except Exception as e:
+            print(f"🔥 Firefox(Follow) 스크롤 오류: {e}")
+
+def scroll_in_edge(data):
+    global driver_edge
+    scroll_x = data.get('scrollX', 0)
+    scroll_y = data.get('scrollY', 0)
+    if driver_edge:
+        try:
+            driver_edge.execute_script(f"window.scrollTo({int(scroll_x)}, {int(scroll_y)});")
+            print(f"✅ Edge(Follow) 스크롤 위치 이동: x={scroll_x}, y={scroll_y}")
+        except Exception as e:
+            print(f"🔥 Edge(Follow) 스크롤 오류: {e}")
+
+def input_in_firefox(data):
+    input_to_driver(driver_firefox, data, "Firefox")
+
+def input_in_edge(data):
+    input_to_driver(driver_edge, data, "Edge")
 
 # =====================[ 기타 기능 함수 ]=====================
 def scroll_in_all(data):
@@ -247,12 +318,19 @@ def scroll_in_all(data):
 
 def inject_js(driver):
     js_code = """
-    if (!window.__browser_sync_injected) {
-        window.__browser_sync_injected = true;
+    console.log("JS 삽입됨");
+
+    function injectSyncEvents(doc) {
+        if (doc.__browser_sync_injected) return;
+        doc.__browser_sync_injected = true;
+
+        // 기존 리스너 제거 (클릭, 스크롤 등)
+        // doc.removeEventListener('click', ...); // 필요시 추가
 
         // 입력값 변경 이벤트 (input, textarea) - debounce 적용
         let inputTimer = null;
-        document.addEventListener('input', function(e) {
+        doc.addEventListener('input', function(e) {
+            if (!doc.hasFocus()) return; // 창이 활성화된 경우만 이벤트 전송
             if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
                 if (inputTimer) clearTimeout(inputTimer);
                 inputTimer = setTimeout(function() {
@@ -262,19 +340,22 @@ def inject_js(driver):
                         id: e.target.id,
                         class: e.target.className,
                         value: e.target.value,
-                        url: window.location.href
+                        url: doc.location.href
                     };
+                    console.log("[브라우저 동기화] input 이벤트 전송", inputInfo);
                     fetch('http://localhost:5000/event', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify(inputInfo)
                     });
-                }, 150); // 150ms debounce
+                }, 150);
             }
         });
 
-        // 클릭 이벤트
-        document.addEventListener('click', function(e) {
+        // 클릭 이벤트 (사용자 직접 클릭만 전송)
+        doc.addEventListener('click', function(e) {
+            if (!doc.hasFocus()) return; // 창이 활성화된 경우만 이벤트 전송
+            if (!e.isTrusted) return;    // 사용자가 직접 클릭한 경우만 이벤트 전송
             let path = [];
             let elem = e.target;
             while (elem && elem.tagName !== 'BODY') {
@@ -294,8 +375,12 @@ def inject_js(driver):
                 id: e.target.id,
                 class: e.target.className,
                 text: e.target.innerText,
-                url: window.location.href
+                url: doc.location.href,
+                ctrlKey: e.ctrlKey,
+                shiftKey: e.shiftKey,
+                altKey: e.altKey
             };
+            console.log("[브라우저 동기화] click 이벤트 전송", elementInfo);
             fetch('http://localhost:5000/event', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -304,7 +389,8 @@ def inject_js(driver):
         });
 
         // 키다운 이벤트
-        document.addEventListener('keydown', function(e) {
+        doc.addEventListener('keydown', function(e) {
+            if (!doc.hasFocus()) return; // 창이 활성화된 경우만 이벤트 전송
             const keyInfo = {
                 action: 'keydown',
                 key: e.key,
@@ -314,6 +400,7 @@ def inject_js(driver):
                 altKey: e.altKey,
                 metaKey: e.metaKey
             };
+            console.log("[브라우저 동기화] keydown 이벤트 전송", keyInfo);
             fetch('http://localhost:5000/event', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -322,41 +409,107 @@ def inject_js(driver):
         });
 
         // 스크롤 이벤트
-        let lastScrollX = window.scrollX;
-        let lastScrollY = window.scrollY;
-        window.addEventListener('scroll', function() {
-            const nowX = window.scrollX;
-            const nowY = window.scrollY;
+        let lastScrollX = doc.defaultView.scrollX;
+        let lastScrollY = doc.defaultView.scrollY;
+        let userScrolled = false;
+        doc.defaultView.addEventListener('wheel', function() {
+            userScrolled = true;
+        }, true);
+        doc.defaultView.addEventListener('scroll', function() {
+            if (!doc.hasFocus()) return;
+            if (!userScrolled) return; // 사용자가 직접 스크롤한 경우만 이벤트 전송
+            const nowX = doc.defaultView.scrollX;
+            const nowY = doc.defaultView.scrollY;
             if (Math.abs(nowX - lastScrollX) > 10 || Math.abs(nowY - lastScrollY) > 10) {
                 lastScrollX = nowX;
                 lastScrollY = nowY;
+                const scrollInfo = {
+                    action: 'scroll',
+                    url: doc.location.href,
+                    scrollX: nowX,
+                    scrollY: nowY
+                };
+                console.log("[브라우저 동기화] scroll 이벤트 전송", scrollInfo);
                 fetch('http://localhost:5000/event', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({
-                        action: 'scroll',
-                        url: window.location.href,
-                        scrollX: nowX,
-                        scrollY: nowY
-                    })
+                    body: JSON.stringify(scrollInfo)
                 });
             }
         });
     }
+
+    // 메인 문서에 주입
+    injectSyncEvents(document);
+
+    // 모든 iframe에도 주입
+    function injectAllIframes(doc) {
+        Array.from(doc.getElementsByTagName('iframe')).forEach(function(iframe) {
+            try {
+                if (iframe.contentDocument) {
+                    injectSyncEvents(iframe.contentDocument);
+                }
+            } catch (e) {
+                // cross-origin iframe은 접근 불가
+            }
+        });
+    }
+    injectAllIframes(document);
+
+    // iframe 동적 생성/변경 감지
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            mutation.addedNodes.forEach(function(node) {
+                if (node.tagName === 'IFRAME') {
+                    try {
+                        if (node.contentDocument) {
+                            injectSyncEvents(node.contentDocument);
+                        }
+                    } catch (e) {}
+                }
+            });
+        });
+        injectAllIframes(document);
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
     """
     driver.execute_script(js_code)
 
 def monitor_and_inject(driver):
     last_url = driver.current_url
+    last_ready_state = None
     while True:
         time.sleep(1)
         try:
-            if driver.current_url != last_url:
-                inject_js(driver)
-                last_url = driver.current_url
+            current_url = driver.current_url
+            ready_state = None
+            try:
+                ready_state = driver.execute_script("return document.readyState")
+            except Exception:
+                pass
+
+            # 1. URL이 바뀌었거나
+            # 2. readyState가 'complete'로 바뀌었을 때 JS 삽입 시도 (SPA 대응)
+            if (current_url != last_url) or (ready_state == "complete" and ready_state != last_ready_state):
+                # 여러 번 재시도 (최대 5회)
+                for attempt in range(5):
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            lambda d: d.execute_script("return document.readyState") == "complete"
+                        )
+                        inject_js(driver)
+                        print(f"[monitor_and_inject] JS 삽입 시도: {current_url} (attempt {attempt+1})")
+                        break
+                    except Exception as e:
+                        print(f"[monitor_and_inject] JS 삽입 재시도 실패: {e}")
+                        time.sleep(1)
+                last_url = current_url
+                last_ready_state = ready_state
+            else:
+                last_ready_state = ready_state
         except Exception as e:
             print(f"monitor_and_inject 종료: {e}")
-            break  # 브라우저가 닫히면 스레드 종료
+            break
 
 def close_all_and_exit():
     try:
@@ -449,12 +602,6 @@ def get_user_input():
     root.mainloop()
     return (root.user_url, root.manual_browser, root.use_chrome_follow, root.use_firefox, root.use_edge, root.edge_driver_path)
 
-def input_in_firefox(data):
-    input_to_driver(driver_firefox, data, "Firefox")
-
-def input_in_edge(data):
-    input_to_driver(driver_edge, data, "Edge")
-
 def input_to_driver(driver, data, browser_name):
     try:
         id_ = data.get('id')
@@ -465,7 +612,7 @@ def input_to_driver(driver, data, browser_name):
             return
         element = None
         if id_:
-            element = wait_and_find_element(driver, By.ID, id_, timeout=5)
+            element = find_element_in_all_frames(driver, By.ID, id_)
         if not element and class_:
             class_name = class_.split()[0]
             element = wait_and_find_element(driver, By.CLASS_NAME, class_name, timeout=5)
@@ -487,7 +634,27 @@ def show_exit_window():
     exit_root = tk.Tk()
     exit_root.title("브라우저 동기화 종료")
     tk.Label(exit_root, text="프로그램을 종료하려면 아래 버튼을 누르세요.").pack(padx=20, pady=10)
+
+    def reconnect_js():
+        try:
+            inject_js(manual_driver)
+            messagebox.showinfo("복구 완료", "수동 브라우저에 JS가 다시 삽입되었습니다.")
+        except Exception as e:
+            messagebox.showerror("오류", f"JS 삽입 실패: {e}")
+
+    def reset_info():
+        global recent_clicks
+        recent_clicks = {
+            "chrome": {"info": None, "time": 0},
+            "firefox": {"info": None, "time": 0},
+            "edge": {"info": None, "time": 0},
+        }
+        messagebox.showinfo("초기화 완료", "저장된 클릭/스크롤 정보가 모두 초기화되었습니다.")
+
+    # 정보초기화 버튼을 종료 버튼 위에 추가
+    tk.Button(exit_root, text="정보초기화", command=reset_info, width=20, height=2).pack(pady=10)
     tk.Button(exit_root, text="종료", command=close_all_and_exit, width=20, height=2).pack(pady=10)
+    tk.Button(exit_root, text="수동 연결 복구", command=reconnect_js, width=20, height=2).pack(pady=10)
     exit_root.protocol("WM_DELETE_WINDOW", lambda: None)
     exit_root.mainloop()
 
@@ -517,9 +684,80 @@ def find_clickable_by_class(driver, keywords=["menu", "btn", "nav", "header"]):
             candidates.append(el)
     return candidates
 
+def find_element_in_all_frames(driver, by, value):
+    # 1. 메인 프레임에서 시도
+    try:
+        return driver.find_element(by, value)
+    except:
+        pass
+    # 2. 모든 iframe에서 시도
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    for iframe in iframes:
+        try:
+            driver.switch_to.frame(iframe)
+            el = driver.find_element(by, value)
+            driver.switch_to.default_content()
+            return el
+        except:
+            driver.switch_to.default_content()
+            continue
+    return None
+
+def find_element_by_path_in_all_frames(driver, path):
+    # 1. 메인 프레임에서 시도
+    try:
+        driver.switch_to.default_content()
+        el = find_element_by_path(driver, path)
+        if el:
+            return el
+    except Exception:
+        pass
+    # 2. 모든 iframe에서 시도
+    iframes = driver.find_elements(By.TAG_NAME, "iframe")
+    for iframe in iframes:
+        try:
+            driver.switch_to.frame(iframe)
+            el = driver.find_element_by_path(driver, path)
+            driver.switch_to.default_content()
+            if el:
+                return el
+        except Exception:
+            driver.switch_to.default_content()
+            continue
+    driver.switch_to.default_content()
+    return None
+
+def find_element_by_path_in_all_frames_recursive(driver, path):
+    def _search(driver):
+        # 1. 현재 프레임에서 시도
+        try:
+            el = find_element_by_path(driver, path)
+            if el:
+                return el
+        except Exception:
+            pass
+        # 2. 하위 iframe에서 재귀적으로 시도
+        iframes = driver.find_elements(By.TAG_NAME, "iframe")
+        for iframe in iframes:
+            try:
+                driver.switch_to.frame(iframe)
+                found = _search(driver)
+                driver.switch_to.default_content()
+                if found:
+                    return found
+            except Exception:
+                driver.switch_to.default_content()
+                continue
+        driver.switch_to.default_content()
+        return None
+    # 항상 최상위 프레임부터 시작
+    driver.switch_to.default_content()
+    return _search(driver)
+
 # =====================[ 메인 실행부 ]=====================
 if __name__ == '__main__':
     test_url, manual_browser, use_chrome_follow, use_firefox, use_edge, edge_driver_path = get_user_input()
+    # manual_browser는 여기서부터 안전하게 사용 가능
 
     chrome_driver_path = ChromeDriverManager().install()
     firefox_driver_path = GeckoDriverManager().install()
@@ -559,7 +797,7 @@ if __name__ == '__main__':
 
     # 따라하기용 Firefox
     driver_firefox = None
-    if use_firefox:
+    if use_firefox and manual_browser != "firefox":
         service_firefox = FirefoxService(executable_path=firefox_driver_path)
         driver_firefox = webdriver.Firefox(service=service_firefox)
         driver_firefox.maximize_window()
@@ -567,7 +805,7 @@ if __name__ == '__main__':
 
     # 따라하기용 Edge
     driver_edge = None
-    if use_edge:
+    if use_edge and manual_browser != "edge":
         service_edge = EdgeService(executable_path=edge_driver_path)
         driver_edge = webdriver.Edge(service=service_edge)
         driver_edge.maximize_window()
@@ -580,4 +818,10 @@ if __name__ == '__main__':
 
     threading.Thread(target=lambda: app.run(port=5000, threaded=True, use_reloader=False)).start()
     threading.Thread(target=monitor_and_inject, args=(manual_driver,)).start()
+    if driver_chrome_follow:
+        threading.Thread(target=monitor_and_inject, args=(driver_chrome_follow,)).start()
+    if driver_firefox:
+        threading.Thread(target=monitor_and_inject, args=(driver_firefox,)).start()
+    if driver_edge:
+        threading.Thread(target=monitor_and_inject, args=(driver_edge,)).start()
     show_exit_window()
