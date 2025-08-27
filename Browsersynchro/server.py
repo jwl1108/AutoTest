@@ -325,38 +325,10 @@ def inject_js(driver):
         if (doc.__browser_sync_injected) return;
         doc.__browser_sync_injected = true;
 
-        // 기존 리스너 제거 (클릭, 스크롤 등)
-        // doc.removeEventListener('click', ...); // 필요시 추가
-
-        // 입력값 변경 이벤트 (input, textarea) - debounce 적용
-        let inputTimer = null;
-        doc.addEventListener('input', function(e) {
-            if (!doc.hasFocus()) return; // 창이 활성화된 경우만 이벤트 전송
-            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
-                if (inputTimer) clearTimeout(inputTimer);
-                inputTimer = setTimeout(function() {
-                    const inputInfo = {
-                        action: 'input',
-                        tag: e.target.tagName,
-                        id: e.target.id,
-                        class: e.target.className,
-                        value: e.target.value,
-                        url: doc.location.href
-                    };
-                    console.log("[브라우저 동기화] input 이벤트 전송", inputInfo);
-                    fetch('http://localhost:5000/event', {
-                        method: 'POST',
-                        headers: {'Content-Type': 'application/json'},
-                        body: JSON.stringify(inputInfo)
-                    });
-                }, 150);
-            }
-        });
-
         // 클릭 이벤트 (사용자 직접 클릭만 전송)
-        doc.addEventListener('click', function(e) {
-            if (!doc.hasFocus()) return; // 창이 활성화된 경우만 이벤트 전송
-            if (!e.isTrusted) return;    // 사용자가 직접 클릭한 경우만 이벤트 전송
+        function clickHandler(e) {
+            if (!doc.hasFocus()) return;
+            if (!e.isTrusted) return;
             let path = [];
             let elem = e.target;
             while (elem && elem.tagName !== 'BODY') {
@@ -387,38 +359,17 @@ def inject_js(driver):
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(elementInfo)
             });
-        });
-
-        // 키다운 이벤트
-        doc.addEventListener('keydown', function(e) {
-            if (!doc.hasFocus()) return; // 창이 활성화된 경우만 이벤트 전송
-            const keyInfo = {
-                action: 'keydown',
-                key: e.key,
-                code: e.code,
-                ctrlKey: e.ctrlKey,
-                shiftKey: e.shiftKey,
-                altKey: e.altKey,
-                metaKey: e.metaKey
-            };
-            console.log("[브라우저 동기화] keydown 이벤트 전송", keyInfo);
-            fetch('http://localhost:5000/event', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(keyInfo)
-            });
-        });
+        }
+        doc.addEventListener('click', clickHandler, true);
+        if (doc.body) {
+            doc.body.addEventListener('click', clickHandler, true);
+        }
 
         // 스크롤 이벤트
         let lastScrollX = doc.defaultView.scrollX;
         let lastScrollY = doc.defaultView.scrollY;
-        let userScrolled = false;
-        doc.defaultView.addEventListener('wheel', function() {
-            userScrolled = true;
-        }, true);
         doc.defaultView.addEventListener('scroll', function() {
             if (!doc.hasFocus()) return;
-            if (!userScrolled) return; // 사용자가 직접 스크롤한 경우만 이벤트 전송
             const nowX = doc.defaultView.scrollX;
             const nowY = doc.defaultView.scrollY;
             if (Math.abs(nowX - lastScrollX) > 10 || Math.abs(nowY - lastScrollY) > 10) {
@@ -438,6 +389,8 @@ def inject_js(driver):
                 });
             }
         });
+
+        // ...이하 생략...
     }
 
     // 메인 문서에 주입
@@ -831,10 +784,4 @@ if __name__ == '__main__':
 
     threading.Thread(target=lambda: app.run(port=5000, threaded=True, use_reloader=False)).start()
     threading.Thread(target=monitor_and_inject, args=(manual_driver,)).start()
-    if driver_chrome_follow:
-        threading.Thread(target=monitor_and_inject, args=(driver_chrome_follow,)).start()
-    if driver_firefox:
-        threading.Thread(target=monitor_and_inject, args=(driver_firefox,)).start()
-    if driver_edge:
-        threading.Thread(target=monitor_and_inject, args=(driver_edge,)).start()
-    show_exit_window()
+    # 따라하기 브라우저에는 실행하지 않음!

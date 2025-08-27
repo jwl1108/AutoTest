@@ -33,6 +33,7 @@ driver_firefox = None
 driver_edge = None
 
 EDGE_DRIVER_PATH = r"D:\Browser\AutoTest\Browsersynchro\drivers\msedgedriver.exe"
+CONFIG_PATH = "edge_driver_path.txt"
 CLICKABLE_TAGS = ["button", "a", "span", "li", "div"]
 
 # 따라하기 브라우저별 최근 클릭 정보 저장
@@ -589,12 +590,14 @@ def get_user_input():
     tk.Label(root, text="Edge 드라이버 경로 (드래그&드롭 가능):").pack()
     edge_entry = tk.Entry(root, width=60)
     edge_entry.pack()
-    edge_entry.insert(0, r"D:\Browser\AutoTest\Browsersynchro\drivers\msedgedriver.exe")
+    # 프로그램 시작 시 저장된 경로 불러오기
+    edge_entry.insert(0, load_edge_driver_path())
     if DND_AVAILABLE:
         def drop(event):
             path = event.data.strip('{}')
             edge_entry.delete(0, tk.END)
             edge_entry.insert(0, path)
+            save_edge_driver_path(path)  # 드래그&드롭 시 경로 저장
         edge_entry.drop_target_register(DND_FILES)
         edge_entry.dnd_bind('<<Drop>>', drop)
     tk.Button(root, text="시작", command=on_submit).pack(pady=10)
@@ -753,6 +756,16 @@ def find_element_by_path_in_all_frames_recursive(driver, path):
     # 항상 최상위 프레임부터 시작
     driver.switch_to.default_content()
     return _search(driver)
+
+def save_edge_driver_path(path):
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        f.write(path.strip())
+
+def load_edge_driver_path():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return EDGE_DRIVER_PATH  # 기본값
 
 # =====================[ 메인 실행부 ]=====================
 if __name__ == '__main__':
