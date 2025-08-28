@@ -493,6 +493,7 @@ except ImportError:
     DND_AVAILABLE = False
 
 def get_user_input():
+    print("설정 UI 창을 띄웁니다")
     def on_submit():
         url = url_entry.get().strip()
         manual_browser = manual_var.get()
@@ -589,6 +590,9 @@ def input_to_driver(driver, data, browser_name):
 def show_exit_window():
     exit_root = tk.Tk()
     exit_root.title("브라우저 동기화 종료")
+    exit_root.geometry("350x250+600+300")
+    exit_root.attributes('-topmost', True)  # 항상 최상단에 고정
+
     tk.Label(exit_root, text="프로그램을 종료하려면 아래 버튼을 누르세요.").pack(padx=20, pady=10)
 
     def reconnect_js():
@@ -607,11 +611,17 @@ def show_exit_window():
         }
         messagebox.showinfo("초기화 완료", "저장된 클릭/스크롤 정보가 모두 초기화되었습니다.")
 
-    # 정보초기화 버튼을 종료 버튼 위에 추가
     tk.Button(exit_root, text="정보초기화", command=reset_info, width=20, height=2).pack(pady=10)
     tk.Button(exit_root, text="종료", command=close_all_and_exit, width=20, height=2).pack(pady=10)
     tk.Button(exit_root, text="수동 연결 복구", command=reconnect_js, width=20, height=2).pack(pady=10)
     exit_root.protocol("WM_DELETE_WINDOW", lambda: None)
+
+    # 항상 최상단 유지 (포커스가 밀릴 때)
+    def keep_on_top():
+        exit_root.lift()
+        exit_root.after(1000, keep_on_top)
+    keep_on_top()
+
     exit_root.mainloop()
 
 def auto_test_all_clickables(driver):
@@ -722,8 +732,10 @@ def load_edge_driver_path():
 
 # =====================[ 메인 실행부 ]=====================
 if __name__ == '__main__':
-    test_url, manual_browser, use_chrome_follow, use_firefox, use_edge, edge_driver_path = get_user_input()
-    # manual_browser는 여기서부터 안전하게 사용 가능
+    try:
+        test_url, manual_browser, use_chrome_follow, use_firefox, use_edge, edge_driver_path = get_user_input()
+    except Exception as e:
+        print("설정 UI 오류:", e)
 
     chrome_driver_path = ChromeDriverManager().install()
     firefox_driver_path = GeckoDriverManager().install()
@@ -785,3 +797,6 @@ if __name__ == '__main__':
     threading.Thread(target=lambda: app.run(port=5000, threaded=True, use_reloader=False)).start()
     threading.Thread(target=monitor_and_inject, args=(manual_driver,)).start()
     # 따라하기 브라우저에는 실행하지 않음!
+
+    # 종료 리모콘 창 띄우기
+    show_exit_window()

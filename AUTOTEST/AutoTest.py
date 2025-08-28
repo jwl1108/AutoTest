@@ -1,99 +1,44 @@
 import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-from selenium import webdriver
-from selenium.webdriver.common.by import By
 import tkinter as tk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 import os
 import re
+import json
 
-# Google Sheets 인증 및 시트 연결
-def connect_google_sheet(sheet_name, worksheet_name, key_path):
-    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-    creds = ServiceAccountCredentials.from_json_keyfile_name(key_path, scope)
-    client = gspread.authorize(creds)
-    sheet = client.open(sheet_name).worksheet(worksheet_name)
-    return sheet
+CONFIG_PATH = "last_sheet_config.json"
 
-# Google Sheets에서 TC 읽기
-def load_tc_sheet(sheet):
-    records = sheet.get_all_records()
-    return records
-
-# Google Sheets에 결과 기록
-def save_tc_result(sheet, results):
-    for idx, result in enumerate(results, start=2):  # 1행은 헤더, 2행부터 데이터
-        sheet.update_cell(idx, sheet.find("Result").col, result["Result"])
-        sheet.update_cell(idx, sheet.find("Time").col, result["Time"])
-
-def check_pre_condition(driver, pre_condition):
-    # "로그인"만 수동 안내, "미로그인"은 자동 진행
-    if "로그인" in pre_condition:
-        print(f"로그인 상태가 필요한 테스트입니다: {pre_condition}")
-        input("로그인 후 Enter를 누르세요.")
-    elif "미로그인" in pre_condition:
-        print("미로그인 상태가 필요한 테스트입니다. 현재 상태로 진행합니다.")
-        # 필요시 자동 로그아웃 코드 추가 가능
-    elif "페이지 노출" in pre_condition:
-        print("페이지 노출 조건입니다. 현재 URL:", driver.current_url)
-        input("페이지가 맞으면 Enter를 누르세요.")
-    else:
-        print(f"자동 준비 조건: {pre_condition}")
-        # 필요시 자동화 코드 추가
-
-# TC 실행 및 결과 기록
-def run_tc_automation(tc_list, sync):
-    results = []
-    for row in tc_list:
-        tc_no = row.get("No")
-        major = row.get("대분류")
-        middle = row.get("중분류")
-        minor = row.get("소분류")
-        pre_condition = row.get("테스트 조건")
-        exec_steps = row.get("실행 순서")
-        expect = row.get("기대 결과")
-
-        print(f"\n[TC {tc_no}] {major}/{middle}/{minor}")
-        print(f"테스트 조건: {pre_condition}")
-
-        check_pre_condition(sync.drivers[0] if sync else driver, pre_condition)
-
-        print(f"실행 순서: {exec_steps}")
-        print(f"기대 결과: {expect}")
-
+def load_last_config():
+    if os.path.exists(CONFIG_PATH):
         try:
-            steps = [s.strip() for s in exec_steps.split('\n') if s.strip()]
-            for step in steps:
-                print(f"실행: {step}")
-                # 실제 자동화는 step에 selector/action 정보가 있으면 자동 실행
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
 
-            # 결과 입력 부분 제거!
-            # result = input(f"기대 결과를 확인 후 Pass/Fail을 입력하세요 (TC {tc_no}): ").strip()
-            result = None  # 팝업에서 입력받으므로 여기서는 None
-        except Exception as e:
-            print(f"TC 실패: {e}")
-            result = "Fail"
-
-        results.append({
-            "Result": result,
-            "Time": time.strftime("%Y-%m-%d %H:%M:%S")
-        })
-    return results
+def save_last_config(sheet_url, key_path):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({"sheet_url": sheet_url, "key_path": key_path}, f)
+    except Exception:
+        pass
 
 def get_sheet_info():
+    last_config = load_last_config()
     root = TkinterDnD.Tk()
     root.title("Google Sheets 정보 입력")
     root.geometry("500x180+300+300")
     root.resizable(False, False)
 
     tk.Label(root, text="구글 스프레드시트 공유 URL을 입력하세요:").pack(pady=(10,0))
-    url_var = tk.StringVar()
+    url_var = tk.StringVar(value=last_config.get("sheet_url", ""))
     url_entry = tk.Entry(root, textvariable=url_var, width=60)
     url_entry.pack(pady=5)
 
     tk.Label(root, text="인증 키 파일 경로(.json):").pack(pady=(10,0))
-    key_path_var = tk.StringVar()
+    key_path_var = tk.StringVar(value=last_config.get("key_path", ""))
     key_entry = tk.Entry(root, textvariable=key_path_var, width=60)
     key_entry.pack(pady=5)
 
@@ -109,6 +54,7 @@ def get_sheet_info():
         sheet_url = url_var.get().strip()
         key_path = key_path_var.get().strip()
         if sheet_url and key_path and os.path.exists(key_path):
+            save_last_config(sheet_url, key_path)
             root.sheet_url = sheet_url
             root.key_path = key_path
             root.destroy()
@@ -119,37 +65,68 @@ def get_sheet_info():
     root.mainloop()
     return getattr(root, "sheet_url", ""), getattr(root, "key_path", "")
 
-# TC 리모컨 팝업
 def tc_remote_controller(tc_list, sheet):
     root = tk.Tk()
     root.title("TC 리모콘")
-    root.geometry("500x470+400+200")
+    root.geometry("900x600+400+200")
     root.attributes('-topmost', True)
-    root.resizable(False, False)  # 창 크기 고정
+    root.resizable(True, True)
 
     idx = [0]
     total = len(tc_list)
 
     result_options = ["Not Test", "Pass", "Fail", "N/A", "Blocked"]
     browser_names = ["Chrome", "Edge", "Firefox"]
+    browser_headers = {
+        "Chrome": "Result\n(PC - chrome)",
+        "Edge": "Result\n(PC - edge)",
+        "Firefox": "Result\n(PC - firefox)"
+    }
+
     browser_vars = {b: tk.BooleanVar(value=True) for b in browser_names}
     result_vars = {b: tk.StringVar(value="Not Test") for b in browser_names}
     qa_comment_var = tk.StringVar()
     sync_var = tk.BooleanVar(value=False)
 
-    # TC 내용 표시용 Text 위젯
-    tc_text_widget = tk.Text(root, width=60, height=10, font=("Arial", 12), wrap="word")
-    tc_text_widget.pack(pady=20, padx=20)
-    tc_text_widget.config(state="disabled")
-
-    # 병합 셀 내용 보존용
     last_tc = {}
+
+    # 결과값과 QA Comment 미리 로드
+    all_values = sheet.get_all_values()
+    header = all_values[15]
+    data_rows = all_values[16:]
+    col_idx = {name: idx for idx, name in enumerate(header)}
+    result_cache = [{} for _ in range(len(data_rows))]
+    qa_comment_cache = [""] * len(data_rows)
+
+    def get_tc_status(i):
+        val = result_cache[i]["Chrome"]
+        return val if val else "Not Test"
+
+    for i, row in enumerate(data_rows):
+        for b in browser_names:
+            col_name = browser_headers[b]
+            idx_ = col_idx.get(col_name)
+            val = row[idx_] if idx_ is not None and idx_ < len(row) else "Not Test"
+            result_cache[i][b] = val if val else "Not Test"
+        idx_qa = col_idx.get("QA Comment")
+        qa_val = row[idx_qa] if idx_qa is not None and idx_qa < len(row) else ""
+        qa_comment_cache[i] = qa_val if qa_val else ""
+
+    # 전체 프레임
+    main_frame = tk.Frame(root)
+    main_frame.pack(fill=tk.BOTH, expand=1)
+
+    # 왼쪽 메인 UI
+    left_frame = tk.Frame(main_frame)
+    left_frame.pack(side="left", fill=tk.BOTH, expand=1)
+
+    tc_text_widget = tk.Text(left_frame, width=60, height=10, font=("Arial", 12), wrap="word")
+    tc_text_widget.pack(padx=20, pady=20, fill=tk.X)
 
     def load_tc(i):
         nonlocal last_tc
         if 0 <= i < total:
             tc = tc_list[i]
-            # 병합 셀 값이 비어 있으면 이전 값 사용
             for key in ["No", "대분류", "중분류", "소분류", "테스트 조건", "실행 순서", "기대 결과"]:
                 if not tc.get(key):
                     tc[key] = last_tc.get(key, "")
@@ -167,18 +144,13 @@ def tc_remote_controller(tc_list, sheet):
                 f"기대 결과: {tc.get('기대 결과')}\n"
             )
             tc_text_widget.config(state="disabled")
-            row_num = i + 17
             for b in browser_names:
-                try:
-                    val = sheet.cell(row_num, sheet.find(f"Result\n(PC - {b.lower()})").col).value
-                except:
-                    val = tc.get(f"Result\n(PC - {b.lower()})", "Not Test")
-                result_vars[b].set(val if val else "Not Test")
-            try:
-                qa_val = sheet.cell(row_num, sheet.find("QA Comment").col).value
-            except:
-                qa_val = tc.get("QA Comment", "")
-            qa_comment_var.set(qa_val if qa_val else "")
+                result_vars[b].set(result_cache[i][b])
+            qa_comment_var.set(qa_comment_cache[i])
+            if tc_no_listbox.winfo_ismapped():
+                tc_no_listbox.selection_clear(0, tk.END)
+                tc_no_listbox.selection_set(i)
+                tc_no_listbox.activate(i)
         else:
             tc_text_widget.config(state="normal")
             tc_text_widget.delete("1.0", tk.END)
@@ -187,12 +159,6 @@ def tc_remote_controller(tc_list, sheet):
             for b in browser_names:
                 result_vars[b].set("")
             qa_comment_var.set("")
-
-    browser_headers = {
-        "Chrome": "Result\n(PC - chrome)",
-        "Edge": "Result\n(PC - edge)",
-        "Firefox": "Result\n(PC - firefox)"
-    }
 
     def save_result():
         i = idx[0]
@@ -205,12 +171,14 @@ def tc_remote_controller(tc_list, sheet):
                         print(f"헤더에서 {browser_headers[b]} 컬럼을 찾을 수 없습니다.")
                         continue
                     sheet.update_cell(row_num, col_obj.col, result_vars[b].get())
+                    result_cache[i][b] = result_vars[b].get()
             col_obj = sheet.find("QA Comment")
             if col_obj:
                 sheet.update_cell(row_num, col_obj.col, qa_comment_var.get())
+                qa_comment_cache[i] = qa_comment_var.get()
             else:
                 print("헤더에서 QA Comment 컬럼을 찾을 수 없습니다.")
-            load_tc(i)
+            update_tc_no_listbox()
 
     def prev_tc():
         if idx[0] > 0:
@@ -234,11 +202,11 @@ def tc_remote_controller(tc_list, sheet):
             for b in browser_names:
                 result_vars[b].trace_vdelete("write", result_vars[b]._trace_id) if hasattr(result_vars[b], "_trace_id") else None
 
-    sync_cb = tk.Checkbutton(root, text="Result 동시 변경", variable=sync_var, command=on_sync_change)
-    sync_cb.pack(pady=(0,5))
+    sync_cb = tk.Checkbutton(left_frame, text="Result 동시 변경", variable=sync_var, command=on_sync_change)
+    sync_cb.pack(anchor="w", padx=20)
 
-    frame = tk.Frame(root)
-    frame.pack(pady=10)
+    frame = tk.Frame(left_frame)
+    frame.pack(pady=10, anchor="w")
     option_menus = {}
     for b in browser_names:
         cb = tk.Checkbutton(frame, text=b, variable=browser_vars[b])
@@ -247,19 +215,55 @@ def tc_remote_controller(tc_list, sheet):
         menu.pack(side="left", padx=3)
         option_menus[b] = menu
 
-    tk.Label(root, text="QA Comment:", font=("Arial", 11)).pack(pady=(20,0))
-    tk.Entry(root, textvariable=qa_comment_var, width=60).pack(pady=5)
+    tk.Label(left_frame, text="QA Comment:", font=("Arial", 11)).pack(anchor="w", padx=20)
+    tk.Entry(left_frame, textvariable=qa_comment_var, width=60).pack(pady=5, anchor="w", padx=20)
 
-    btn_frame = tk.Frame(root)
-    btn_frame.pack(pady=15)
+    btn_frame = tk.Frame(left_frame)
+    btn_frame.pack(pady=15, anchor="w", padx=20)
     tk.Button(btn_frame, text="이전 TC", command=prev_tc, width=10).pack(side="left", padx=10)
     tk.Button(btn_frame, text="저장", command=save_result, width=10).pack(side="left", padx=10)
     tk.Button(btn_frame, text="다음 TC", command=next_tc, width=10).pack(side="left", padx=10)
 
+    # 오른쪽 TC NO 리스트 프레임
+    right_frame = tk.Frame(main_frame)
+    right_frame.pack(side="right", fill=tk.Y)
+
+    # 리스트 박스
+    tc_no_listbox = tk.Listbox(right_frame, width=20, height=30)
+    tc_no_listbox.pack(fill=tk.BOTH, expand=1, padx=(10,0), pady=(20,0))
+
+    def update_tc_no_listbox():
+        tc_no_listbox.delete(0, tk.END)
+        for i, tc in enumerate(tc_list):
+            status = get_tc_status(i)
+            display = f"{tc.get('No','')} [{status}]"
+            tc_no_listbox.insert(tk.END, display)
+
+    def on_tc_no_select(event):
+        sel = tc_no_listbox.curselection()
+        if sel:
+            idx[0] = sel[0]
+            load_tc(idx[0])
+
+    tc_no_listbox.bind("<<ListboxSelect>>", on_tc_no_select)
+
+    # 리스트 숨기기/보이기 버튼 (root 우측 하단에 고정)
+    def toggle_listbox():
+        if right_frame.winfo_ismapped():
+            right_frame.pack_forget()
+            toggle_btn.config(text="TC 리스트 열기")
+        else:
+            right_frame.pack(side="right", fill=tk.Y)
+            toggle_btn.config(text="TC 리스트 닫기")
+
+    # 버튼을 root 우측 하단에 고정
+    toggle_btn = tk.Button(root, text="TC 리스트 닫기", command=toggle_listbox)
+    toggle_btn.place(relx=0.0, rely=1.0, anchor="sw", x=-20, y=-20)  # 창 우측 하단에 고정
+
+    update_tc_no_listbox()
     load_tc(idx[0])
     root.mainloop()
 
-# 사용 예시
 if __name__ == "__main__":
     SHEET_URL, KEY_PATH = get_sheet_info()
     print("스프레드시트 URL:", SHEET_URL)
@@ -271,15 +275,9 @@ if __name__ == "__main__":
     creds = ServiceAccountCredentials.from_json_keyfile_name(KEY_PATH, scope)
     client = gspread.authorize(creds)
     sheet = client.open_by_key(sheet_id)
-    worksheet = sheet.get_worksheet(0)  # 첫 번째 워크시트 사용
+    worksheet = sheet.get_worksheet(0)
     actual_headers = worksheet.row_values(16)
     print("실제 헤더:", actual_headers)
     tc_list = worksheet.get_all_records(expected_headers=actual_headers, head=16)
 
-    browser_headers = {
-        "Chrome": "Result\n(PC - chrome)",
-        "Edge": "Result\n(PC - edge)",
-        "Firefox": "Result\n(PC - firefox)"
-    }
-
-    tc_remote_controller(tc_list, worksheet)  # sheet → worksheet로 변경
+    tc_remote_controller(tc_list, worksheet)
